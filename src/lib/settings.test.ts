@@ -1,23 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeSettings } from './settings';
+import { DEFAULT_HARDENING, normalizeSettings } from './settings';
+
+const defaults = {
+  enabled: true,
+  pausedSites: [],
+  scriptExceptions: [],
+  iframeExceptions: [],
+  hardening: { ...DEFAULT_HARDENING },
+};
 
 describe('normalizeSettings', () => {
   it('returns defaults for missing or invalid values', () => {
-    expect(normalizeSettings(undefined)).toEqual({
-      enabled: true,
-      pausedSites: [],
-      scriptExceptions: [],
-    });
-    expect(normalizeSettings(null)).toEqual({
-      enabled: true,
-      pausedSites: [],
-      scriptExceptions: [],
-    });
-    expect(normalizeSettings('nope')).toEqual({
-      enabled: true,
-      pausedSites: [],
-      scriptExceptions: [],
-    });
+    expect(normalizeSettings(undefined)).toEqual(defaults);
+    expect(normalizeSettings(null)).toEqual(defaults);
+    expect(normalizeSettings('nope')).toEqual(defaults);
   });
 
   it('normalizes, deduplicates, and sorts paused sites', () => {
@@ -34,9 +30,9 @@ describe('normalizeSettings', () => {
     });
 
     expect(settings).toEqual({
+      ...defaults,
       enabled: false,
       pausedSites: ['b.github.io', 'example.com', 'foo.co.uk'],
-      scriptExceptions: [],
     });
   });
 
@@ -74,5 +70,45 @@ describe('normalizeSettings', () => {
         script: 'https://cdn.other.test/a.js',
       },
     ]);
+  });
+
+  it('normalizes and deduplicates iframe exceptions', () => {
+    const settings = normalizeSettings({
+      iframeExceptions: [
+        {
+          site: 'https://www.example.com/path',
+          frame: 'https://www.youtube.com/embed/abc?autoplay=1',
+        },
+        { site: 'example.com', frame: 'https://www.youtube.com' },
+        { site: 'example.com', frame: 'https://www.youtube.com:443/' },
+        { site: 'not a domain', frame: 'https://player.vimeo.com' },
+        { site: 'example.com', frame: 'javascript:alert(1)' },
+        { site: 'example.com' },
+        null,
+      ],
+    });
+
+    expect(settings.iframeExceptions).toEqual([
+      { site: 'example.com', frame: 'https://www.youtube.com' },
+    ]);
+  });
+
+  it('normalizes hardening defaults and boolean overrides', () => {
+    expect(
+      normalizeSettings({
+        hardening: {
+          blockBeacons: false,
+          stripTrackingParams: false,
+          removeThirdPartyReferer: true,
+          sendGpc: false,
+        },
+      }).hardening,
+    ).toEqual({
+      ...DEFAULT_HARDENING,
+      blockBeacons: false,
+      stripTrackingParams: false,
+      removeThirdPartyReferer: true,
+      sendGpc: false,
+    });
   });
 });

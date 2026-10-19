@@ -77,6 +77,24 @@ export function normalizeScriptUrl(value: string): string | null {
   return `${url.origin}${url.pathname || '/'}`;
 }
 
+/**
+ * Normalizes an iframe URL to its origin for per-site click-to-load
+ * exceptions. All paths on the origin are covered.
+ */
+export function normalizeFrameOrigin(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (!url.hostname) return null;
+
+  return url.origin;
+}
+
 function isValidHostname(host: string): boolean {
   if (host.length > 253) return false;
   return host.split('.').every((label) => LABEL.test(label));

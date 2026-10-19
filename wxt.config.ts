@@ -22,6 +22,7 @@ export default defineConfig({
       default_icon: ICONS,
     },
     permissions: ['storage', 'declarativeNetRequest', 'activeTab'],
+    host_permissions: ['http://*/*', 'https://*/*'],
     ...(browser === 'chrome' ? { minimum_chrome_version: '120' } : {}),
     ...(browser === 'firefox'
       ? {

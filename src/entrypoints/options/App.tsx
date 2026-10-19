@@ -7,6 +7,7 @@ import { requestRuleSync, requestStatsReset } from '../../lib/messaging';
 import {
   MAX_PAUSED_SITES,
   updateSettings,
+  type HardeningSettings,
   type Settings,
 } from '../../lib/settings';
 import { formatCount, formatRelativeTime } from '../../lib/time';
@@ -73,6 +74,26 @@ export function App() {
         text: next.enabled
           ? 'Protection is on. Reload open tabs to apply it.'
           : 'Protection is off on every site.',
+      });
+    }
+  };
+
+  const toggleHardening = async (key: keyof HardeningSettings) => {
+    if (busy) return;
+    setMessage(null);
+
+    const next = await commit((current) => ({
+      ...current,
+      hardening: {
+        ...current.hardening,
+        [key]: !current.hardening[key],
+      },
+    }));
+
+    if (next) {
+      setMessage({
+        tone: 'success',
+        text: 'Hardening updated. Reload open tabs to apply it to existing requests.',
       });
     }
   };
@@ -152,6 +173,26 @@ export function App() {
     }
   };
 
+  const removeIframeException = async (site: string, frame: string) => {
+    if (busy) return;
+    setMessage(null);
+
+    const next = await commit((current) => ({
+      ...current,
+      iframeExceptions: current.iframeExceptions.filter(
+        (exception) =>
+          !(exception.site === site && exception.frame === frame),
+      ),
+    }));
+
+    if (next) {
+      setMessage({
+        tone: 'success',
+        text: `Embeds from ${frame} are blocked again on ${site}.`,
+      });
+    }
+  };
+
   const clearSites = async () => {
     if (busy) return;
 
@@ -207,6 +248,16 @@ export function App() {
     ([siteA], [siteB]) => siteA.localeCompare(siteB),
   );
 
+  const iframeGroups = new Map<string, string[]>();
+  for (const exception of settings.iframeExceptions) {
+    const frames = iframeGroups.get(exception.site) ?? [];
+    frames.push(exception.frame);
+    iframeGroups.set(exception.site, frames);
+  }
+  const groupedIframes = [...iframeGroups.entries()].sort(
+    ([siteA], [siteB]) => siteA.localeCompare(siteB),
+  );
+
   return (
     <main className="page">
       <header className="page-header">
@@ -227,8 +278,10 @@ export function App() {
         <h2>Keep each site&apos;s code. Drop everyone else&apos;s.</h2>
         <p className="lede">
           ScriptShredder blocks script requests that come from a different site
-          than the page making the request. First-party JavaScript keeps
-          working, so sites stay functional without a blanket script ban.
+          than the page making the request, with optional hardening for
+          beacons, tracking parameters, embeds, and fingerprinting headers.
+          First-party JavaScript keeps working, so sites stay functional without
+          a blanket script ban.
         </p>
       </section>
 
@@ -246,8 +299,8 @@ export function App() {
           <div className="row-copy">
             <h3>Protection</h3>
             <p className="note">
-              Blocks third-party script requests on every site that isn&apos;t
-              paused below.
+              Blocks third-party script requests and the optional hardening
+              channels below on every site that isn&apos;t paused.
             </p>
           </div>
           <Toggle
@@ -273,13 +326,78 @@ export function App() {
       <section className="card">
         <div className="row">
           <div className="row-copy">
+            <h3>Balanced hardening</h3>
+            <p className="note">
+              Extra privacy protections beyond script blocking. Header and
+              URL-parameter changes apply to new requests; reload open tabs to
+              update existing ones.
+            </p>
+          </div>
+        </div>
+
+        <div className="hardening-list">
+          <HardeningRow
+            title="Block third-party beacons and reports"
+            description="Blocks sendBeacon, hyperlink auditing, and CSP/NEL reports sent to another site."
+            checked={settings.hardening.blockBeacons}
+            disabled={busy}
+            onChange={() => void toggleHardening('blockBeacons')}
+          />
+          <HardeningRow
+            title="Strip tracking parameters"
+            description="Removes fbclid, gclid, utm_*, and similar parameters from navigations and link clicks."
+            checked={settings.hardening.stripTrackingParams}
+            disabled={busy}
+            onChange={() => void toggleHardening('stripTrackingParams')}
+          />
+          <HardeningRow
+            title="Remove third-party Referer"
+            description="Hides the referring page from cross-site requests. This can break hotlink protection and some payment or CSRF flows."
+            checked={settings.hardening.removeThirdPartyReferer}
+            disabled={busy}
+            onChange={() => void toggleHardening('removeThirdPartyReferer')}
+          />
+          <HardeningRow
+            title="Remove speculative connections"
+            description="Drops third-party dns-prefetch, preconnect, prefetch, and prerender links. Best effort, because the browser may act before the page script runs."
+            checked={settings.hardening.removeSpeculationLinks}
+            disabled={busy}
+            onChange={() => void toggleHardening('removeSpeculationLinks')}
+          />
+          <HardeningRow
+            title="Reduce fingerprinting headers"
+            description="Removes third-party Client Hints and Chrome's X-Client-Data header."
+            checked={settings.hardening.reduceFingerprintHeaders}
+            disabled={busy}
+            onChange={() => void toggleHardening('reduceFingerprintHeaders')}
+          />
+          <HardeningRow
+            title="Send Global Privacy Control"
+            description="Adds Sec-GPC: 1 to requests as a machine-readable opt-out signal."
+            checked={settings.hardening.sendGpc}
+            disabled={busy}
+            onChange={() => void toggleHardening('sendGpc')}
+          />
+          <HardeningRow
+            title="Click-to-load third-party embeds"
+            description="Replaces third-party iframes with a Load placeholder. Allowed embeds are remembered per site."
+            checked={settings.hardening.clickToLoadIframes}
+            disabled={busy}
+            onChange={() => void toggleHardening('clickToLoadIframes')}
+          />
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="row">
+          <div className="row-copy">
             <h3>
               Paused sites
               <span className="count-badge">{pausedCount}</span>
             </h3>
             <p className="note">
-              Paused sites may load third-party scripts. Use this when blocking
-              breaks a site.
+              Paused sites may load third-party scripts and embeds. Use this
+              when blocking breaks a site.
             </p>
           </div>
           {pausedCount > 0 ? (
@@ -391,6 +509,58 @@ export function App() {
         <div className="row">
           <div className="row-copy">
             <h3>
+              Allowed embeds
+              <span className="count-badge">
+                {settings.iframeExceptions.length}
+              </span>
+            </h3>
+            <p className="note">
+              Third-party iframes you loaded on a site. Remove one to block it
+              again. Click-to-load can be turned off in Balanced hardening.
+            </p>
+          </div>
+        </div>
+
+        {groupedIframes.length === 0 ? (
+          <p className="empty">
+            No embeds allowed. Use Load on a blocked third-party embed.
+          </p>
+        ) : (
+          <div className="exception-groups">
+            {groupedIframes.map(([site, frames]) => (
+              <div className="exception-group" key={site}>
+                <h4>{site}</h4>
+                <ul>
+                  {frames.map((frame) => (
+                    <li key={frame}>
+                      <span className="exception-script" title={frame}>
+                        {frame}
+                      </span>
+                      <button
+                        type="button"
+                        className="remove"
+                        onClick={() =>
+                          void removeIframeException(site, frame)
+                        }
+                        disabled={busy}
+                        aria-label={`Block ${frame} on ${site} again`}
+                        title={`Block ${frame} on ${site} again`}
+                      >
+                        ×
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="card">
+        <div className="row">
+          <div className="row-copy">
+            <h3>
               Most blocked scripts
               <span className="count-badge">
                 {formatCount(totalBlocks)}
@@ -476,6 +646,13 @@ export function App() {
             current page, with an Allow action for individual scripts.
           </li>
           <li>
+            <strong>Hardening closes other channels.</strong> Third-party
+            beacons, tracking parameters, speculative connections,
+            fingerprinting headers, and third-party embeds are handled by the
+            Balanced hardening options. Header support and speculative-link
+            removal vary by browser and are best effort.
+          </li>
+          <li>
             <strong>Counters are inferred locally.</strong> The page collector
             reports script URLs to the background, which checks them against
             the current settings before incrementing the most-blocked list.
@@ -483,11 +660,13 @@ export function App() {
           </li>
         </ol>
         <p className="note limitations">
-          Only network script requests are blocked. Inline scripts,{' '}
+          Only network script requests are counted. Inline scripts,{' '}
           <code>eval</code>, and JavaScript downloaded as data and then executed
           are outside a network-level blocklist&apos;s reach. Dynamic imports
           and workers aren&apos;t represented as script elements, so they may be
-          blocked without appearing in the page list or counters.
+          blocked without appearing in the page list or counters. Click-to-load
+          covers iframes in the top frame; headers and tracking-parameter
+          cleanup depend on the browser&apos;s declarativeNetRequest support.
         </p>
       </section>
 
@@ -496,5 +675,36 @@ export function App() {
         <span>No accounts. No telemetry. Settings stay on this device.</span>
       </footer>
     </main>
+  );
+}
+
+type HardeningRowProps = {
+  title: string;
+  description: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: () => void;
+};
+
+function HardeningRow({
+  title,
+  description,
+  checked,
+  disabled,
+  onChange,
+}: HardeningRowProps) {
+  return (
+    <div className="hardening-row">
+      <div className="hardening-copy">
+        <span className="hardening-title">{title}</span>
+        <p className="note">{description}</p>
+      </div>
+      <Toggle
+        checked={checked}
+        onChange={onChange}
+        disabled={disabled}
+        label={title}
+      />
+    </div>
   );
 }

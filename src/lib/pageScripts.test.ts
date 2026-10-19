@@ -5,7 +5,7 @@ import {
   isScriptBlocked,
   listThirdPartyScripts,
 } from './pageScripts';
-import type { Settings } from './settings';
+import { DEFAULT_HARDENING, type Settings } from './settings';
 
 const pageUrl = 'https://www.example.com/page';
 const rawScripts = [
@@ -22,6 +22,8 @@ function settings(patch: Partial<Settings> = {}): Settings {
     enabled: true,
     pausedSites: [],
     scriptExceptions: [],
+    iframeExceptions: [],
+    hardening: { ...DEFAULT_HARDENING },
     ...patch,
   };
 }

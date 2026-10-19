@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  normalizeFrameOrigin,
   normalizeScriptUrl,
   normalizeSiteInput,
   siteFromHostname,
@@ -96,5 +97,26 @@ describe('normalizeScriptUrl', () => {
     expect(normalizeScriptUrl('blob:https://example.com/id')).toBeNull();
     expect(normalizeScriptUrl('javascript:alert(1)')).toBeNull();
     expect(normalizeScriptUrl('not a url')).toBeNull();
+  });
+});
+
+describe('normalizeFrameOrigin', () => {
+  it('normalizes iframe URLs to their origin', () => {
+    expect(
+      normalizeFrameOrigin('https://www.youtube.com/embed/abc?autoplay=1'),
+    ).toBe('https://www.youtube.com');
+    expect(normalizeFrameOrigin('http://localhost:3000/embed')).toBe(
+      'http://localhost:3000',
+    );
+    expect(normalizeFrameOrigin('https://EXAMPLE.com:443/embed')).toBe(
+      'https://example.com',
+    );
+  });
+
+  it('rejects non-http iframe URLs', () => {
+    expect(normalizeFrameOrigin('javascript:alert(1)')).toBeNull();
+    expect(normalizeFrameOrigin('data:text/html,hi')).toBeNull();
+    expect(normalizeFrameOrigin('blob:https://example.com/id')).toBeNull();
+    expect(normalizeFrameOrigin('not a url')).toBeNull();
   });
 });

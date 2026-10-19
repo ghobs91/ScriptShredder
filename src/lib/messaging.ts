@@ -1,7 +1,10 @@
 import { browser } from 'wxt/browser';
+import type { HardeningSettings } from './settings';
 
 export const SYNC_RULES_MESSAGE = 'scriptshredder:sync-rules' as const;
 export const GET_PAGE_SCRIPTS_MESSAGE = 'scriptshredder:get-page-scripts' as const;
+export const GET_PAGE_CONTEXT_MESSAGE = 'scriptshredder:get-page-context' as const;
+export const ALLOW_IFRAME_MESSAGE = 'scriptshredder:allow-iframe' as const;
 export const RECORD_BLOCKED_SCRIPTS_MESSAGE =
   'scriptshredder:record-blocked-scripts' as const;
 export const RESET_STATS_MESSAGE = 'scriptshredder:reset-stats' as const;
@@ -12,6 +15,17 @@ export type SyncRulesMessage = {
 
 export type GetPageScriptsMessage = {
   type: typeof GET_PAGE_SCRIPTS_MESSAGE;
+};
+
+export type GetPageContextMessage = {
+  type: typeof GET_PAGE_CONTEXT_MESSAGE;
+  pageUrl: string;
+};
+
+export type AllowIframeMessage = {
+  type: typeof ALLOW_IFRAME_MESSAGE;
+  site: string;
+  frame: string;
 };
 
 export type RecordBlockedScriptsMessage = {
@@ -29,6 +43,14 @@ export type PageScriptsResponse = {
   scripts: string[];
 };
 
+export type PageContext = {
+  site: string | null;
+  enabled: boolean;
+  paused: boolean;
+  hardening: HardeningSettings;
+  iframeExceptions: string[];
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -41,6 +63,27 @@ export function isGetPageScriptsMessage(
   value: unknown,
 ): value is GetPageScriptsMessage {
   return isRecord(value) && value.type === GET_PAGE_SCRIPTS_MESSAGE;
+}
+
+export function isGetPageContextMessage(
+  value: unknown,
+): value is GetPageContextMessage {
+  return (
+    isRecord(value) &&
+    value.type === GET_PAGE_CONTEXT_MESSAGE &&
+    typeof value.pageUrl === 'string'
+  );
+}
+
+export function isAllowIframeMessage(
+  value: unknown,
+): value is AllowIframeMessage {
+  return (
+    isRecord(value) &&
+    value.type === ALLOW_IFRAME_MESSAGE &&
+    typeof value.site === 'string' &&
+    typeof value.frame === 'string'
+  );
 }
 
 export function isResetStatsMessage(value: unknown): value is ResetStatsMessage {
@@ -108,6 +151,34 @@ export async function recordPageScripts(
     pageUrl,
     scripts,
   } satisfies RecordBlockedScriptsMessage);
+}
+
+export async function getPageContext(
+  pageUrl: string,
+): Promise<PageContext | null> {
+  const response = (await browser.runtime.sendMessage({
+    type: GET_PAGE_CONTEXT_MESSAGE,
+    pageUrl,
+  } satisfies GetPageContextMessage)) as unknown;
+
+  if (!isRecord(response) || !isRecord(response.context)) return null;
+
+  return response.context as unknown as PageContext;
+}
+
+export async function allowIframe(
+  site: string,
+  frame: string,
+): Promise<void> {
+  const response = (await browser.runtime.sendMessage({
+    type: ALLOW_IFRAME_MESSAGE,
+    site,
+    frame,
+  } satisfies AllowIframeMessage)) as { ok?: boolean; error?: string } | undefined;
+
+  if (response?.ok === false) {
+    throw new Error(response.error ?? 'Could not allow iframe');
+  }
 }
 
 export async function requestStatsReset(): Promise<void> {

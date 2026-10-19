@@ -1,5 +1,6 @@
 import { browser } from 'wxt/browser';
 import {
+  normalizeFrameOrigin,
   normalizeScriptUrl,
   normalizeSiteInput,
   siteFromHostname,
@@ -8,6 +9,7 @@ import {
 export const SETTINGS_KEY = 'settings';
 export const MAX_PAUSED_SITES = 500;
 export const MAX_SCRIPT_EXCEPTIONS = 500;
+export const MAX_IFRAME_EXCEPTIONS = 300;
 
 export type ScriptException = {
   /** Registrable domain where the exception applies. */
@@ -16,17 +18,72 @@ export type ScriptException = {
   script: string;
 };
 
+export type IframeException = {
+  /** Registrable domain where the exception applies. */
+  site: string;
+  /** Third-party iframe origin, for example https://www.youtube.com */
+  frame: string;
+};
+
+export type HardeningSettings = {
+  /** Block third-party ping/CSP report requests and DOM ping attributes. */
+  blockBeacons: boolean;
+  /** Strip known tracking parameters from navigations and link clicks. */
+  stripTrackingParams: boolean;
+  /** Remove the Referer header on third-party requests. */
+  removeThirdPartyReferer: boolean;
+  /** Remove third-party dns-prefetch/preconnect/prefetch/prerender links. */
+  removeSpeculationLinks: boolean;
+  /** Remove third-party Client Hints and X-Client-Data. */
+  reduceFingerprintHeaders: boolean;
+  /** Send Sec-GPC: 1 on requests. */
+  sendGpc: boolean;
+  /** Replace third-party iframes with a click-to-load placeholder. */
+  clickToLoadIframes: boolean;
+};
+
+export const DEFAULT_HARDENING: HardeningSettings = {
+  blockBeacons: true,
+  stripTrackingParams: true,
+  removeThirdPartyReferer: false,
+  removeSpeculationLinks: true,
+  reduceFingerprintHeaders: true,
+  sendGpc: true,
+  clickToLoadIframes: true,
+};
+
 export type Settings = {
   enabled: boolean;
   pausedSites: string[];
   scriptExceptions: ScriptException[];
+  iframeExceptions: IframeException[];
+  hardening: HardeningSettings;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
   enabled: true,
   pausedSites: [],
   scriptExceptions: [],
+  iframeExceptions: [],
+  hardening: DEFAULT_HARDENING,
 };
+
+export function normalizeHardening(value: unknown): HardeningSettings {
+  const record =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+
+  const next: HardeningSettings = { ...DEFAULT_HARDENING };
+  for (const key of Object.keys(DEFAULT_HARDENING) as Array<
+    keyof HardeningSettings
+  >) {
+    if (typeof record[key] === 'boolean') {
+      next[key] = record[key] as boolean;
+    }
+  }
+  return next;
+}
 
 export function normalizeSettings(value: unknown): Settings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -34,6 +91,8 @@ export function normalizeSettings(value: unknown): Settings {
       enabled: DEFAULT_SETTINGS.enabled,
       pausedSites: [],
       scriptExceptions: [],
+      iframeExceptions: [],
+      hardening: normalizeHardening(undefined),
     };
   }
 
@@ -78,10 +137,44 @@ export function normalizeSettings(value: unknown): Settings {
       a.site.localeCompare(b.site) || a.script.localeCompare(b.script),
   );
 
+  const rawFrames = Array.isArray(record.iframeExceptions)
+    ? record.iframeExceptions
+    : [];
+
+  const frames = rawFrames.flatMap((value): IframeException[] => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+
+    const entry = value as Record<string, unknown>;
+    if (typeof entry.site !== 'string' || typeof entry.frame !== 'string') {
+      return [];
+    }
+
+    const site =
+      siteFromHostname(entry.site) ?? normalizeSiteInput(entry.site);
+    const frame = normalizeFrameOrigin(entry.frame);
+    return site && frame ? [{ site, frame }] : [];
+  });
+
+  const uniqueFrames = [
+    ...new Map(
+      frames.map((exception) => [
+        `${exception.site}\n${exception.frame}`,
+        exception,
+      ]),
+    ).values(),
+  ]
+    .sort(
+      (a, b) =>
+        a.site.localeCompare(b.site) || a.frame.localeCompare(b.frame),
+    )
+    .slice(0, MAX_IFRAME_EXCEPTIONS);
+
   return {
     enabled,
     pausedSites: [...new Set(sites)].sort().slice(0, MAX_PAUSED_SITES),
     scriptExceptions: uniqueExceptions.slice(0, MAX_SCRIPT_EXCEPTIONS),
+    iframeExceptions: uniqueFrames,
+    hardening: normalizeHardening(record.hardening),
   };
 }
 
@@ -113,5 +206,15 @@ export function hasScriptException(
 ): boolean {
   return settings.scriptExceptions.some(
     (exception) => exception.site === site && exception.script === script,
+  );
+}
+
+export function hasIframeException(
+  settings: Settings,
+  site: string,
+  frame: string,
+): boolean {
+  return settings.iframeExceptions.some(
+    (exception) => exception.site === site && exception.frame === frame,
   );
 }
