@@ -1,0 +1,43 @@
+{
+  "name": "scriptshredder",
+  "description": "Block third-party JavaScript on every site.",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "dev:safari": "wxt -b safari --mv3",
+    "build": "wxt build -b chrome",
+    "build:chrome": "wxt build -b chrome",
+    "build:firefox": "wxt build -b firefox",
+    "build:safari": "wxt build -b safari --mv3",
+    "build:all": "npm run build:chrome && npm run build:firefox && npm run build:safari",
+    "zip": "wxt zip -b chrome && wxt zip -b firefox",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "npm run build:chrome && playwright test",
+    "package:safari": "bash scripts/package-safari.sh",
+    "postinstall": "wxt prepare",
+    "icons": "node scripts/render-icons.mjs",
+    "package:safari:ios": "bash scripts/package-safari-ios.sh"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tldts": "^7.4.18"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/chrome": "^0.3.5",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@wxt-dev/module-react": "^1.2.2",
+    "sharp": "^0.35.5",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5",
+    "wxt": "^0.21.4"
+  }
+}
