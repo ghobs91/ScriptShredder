@@ -147,3 +147,14 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# WXT
+.wxt/
+
+# Playwright
+test-results/
+playwright-report/
+blob-report/
+
+# macOS
+.DS_Store
