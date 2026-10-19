@@ -9,6 +9,7 @@ import path from 'node:path';
 
 const extensionPath = path.resolve('.output/chrome-mv3');
 const trackerUrl = 'http://cdn.test:4173/tracker.js';
+const embedOrigin = 'http://widget.test:4173';
 
 type Flags = {
   firstPartyLoaded?: boolean;
@@ -23,6 +24,14 @@ type BlockedStats = {
     count: number;
     lastBlockedAt: number;
   }>;
+};
+
+type Settings = {
+  iframeExceptions?: Array<{ site: string; frame: string }>;
+};
+
+type ImageHeaders = {
+  image: Record<string, string> | null;
 };
 
 async function readFlags(page: Page): Promise<Flags> {
@@ -51,11 +60,23 @@ async function getDynamicRules(context: BrowserContext) {
   );
 }
 
+async function getBlockRule(context: BrowserContext) {
+  return (await getDynamicRules(context)).find((rule) => rule.id === 1);
+}
+
 async function getStats(context: BrowserContext): Promise<BlockedStats | null> {
   const worker = await getWorker(context);
   return worker.evaluate(async () => {
     const stored = await chrome.storage.local.get('blockedStats');
     return (stored.blockedStats as BlockedStats | undefined) ?? null;
+  });
+}
+
+async function getSettings(context: BrowserContext): Promise<Settings | null> {
+  const worker = await getWorker(context);
+  return worker.evaluate(async () => {
+    const stored = await chrome.storage.local.get('settings');
+    return (stored.settings as Settings | undefined) ?? null;
   });
 }
 
@@ -87,10 +108,28 @@ async function openOptions(context: BrowserContext) {
   return page;
 }
 
-async function openSite(context: BrowserContext) {
+async function openSite(context: BrowserContext, pathname = '/') {
   const page = await context.newPage();
-  await page.goto('http://site.test:4173/', { waitUntil: 'load' });
+  await page.goto(`http://site.test:4173${pathname}`, { waitUntil: 'load' });
   return page;
+}
+
+async function fetchImageHeaders(): Promise<ImageHeaders> {
+  const response = await fetch('http://127.0.0.1:4173/headers.json');
+  return (await response.json()) as ImageHeaders;
+}
+
+async function resetImageHeaders(): Promise<void> {
+  await fetch('http://127.0.0.1:4173/reset-headers');
+}
+
+async function fetchPageUrl(): Promise<{ url: string | null }> {
+  const response = await fetch('http://127.0.0.1:4173/page-url.json');
+  return (await response.json()) as { url: string | null };
+}
+
+async function resetPageUrl(): Promise<void> {
+  await fetch('http://127.0.0.1:4173/reset-page-url');
 }
 
 test.describe('third-party script blocking', () => {
@@ -103,7 +142,7 @@ test.describe('third-party script blocking', () => {
       args: [
         `--disable-extensions-except=${extensionPath}`,
         `--load-extension=${extensionPath}`,
-        '--host-resolver-rules=MAP site.test 127.0.0.1, MAP api.site.test 127.0.0.1, MAP cdn.test 127.0.0.1',
+        '--host-resolver-rules=MAP site.test 127.0.0.1, MAP api.site.test 127.0.0.1, MAP cdn.test 127.0.0.1, MAP widget.test 127.0.0.1',
       ],
     });
   });
@@ -114,8 +153,8 @@ test.describe('third-party script blocking', () => {
 
   test('blocks third-party scripts but allows first-party and same-site scripts', async () => {
     await expect
-      .poll(async () => (await getDynamicRules(context)).length)
-      .toBe(1);
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
 
     const page = await openSite(context);
     const flags = await readFlags(page);
@@ -127,8 +166,8 @@ test.describe('third-party script blocking', () => {
 
   test('lists page scripts and records local blocked-script counters', async () => {
     await expect
-      .poll(async () => (await getDynamicRules(context)).length)
-      .toBe(1);
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
 
     const page = await openSite(context);
     await page.waitForTimeout(700);
@@ -167,8 +206,8 @@ test.describe('third-party script blocking', () => {
 
   test('background acknowledges a rule-sync request', async () => {
     await expect
-      .poll(async () => (await getDynamicRules(context)).length)
-      .toBe(1);
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
 
     const options = await openOptions(context);
     const response = await options.evaluate(() =>
@@ -180,8 +219,8 @@ test.describe('third-party script blocking', () => {
 
   test('pausing a site through settings allows its third-party scripts', async () => {
     await expect
-      .poll(async () => (await getDynamicRules(context)).length)
-      .toBe(1);
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
 
     const options = await openOptions(context);
     await options.getByLabel('Site to pause').fill('site.test');
@@ -208,8 +247,8 @@ test.describe('third-party script blocking', () => {
 
   test('turning protection off allows all scripts', async () => {
     await expect
-      .poll(async () => (await getDynamicRules(context)).length)
-      .toBe(1);
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
 
     const options = await openOptions(context);
     await options
@@ -229,8 +268,8 @@ test.describe('third-party script blocking', () => {
 
   test('allows a single script on a site, then blocks it again', async () => {
     await expect
-      .poll(async () => (await getDynamicRules(context)).length)
-      .toBe(1);
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
 
     const options = await openOptions(context);
     await options.evaluate(async (script) => {
@@ -285,8 +324,8 @@ test.describe('third-party script blocking', () => {
 
   test('removing a paused site blocks it again', async () => {
     await expect
-      .poll(async () => (await getDynamicRules(context)).length)
-      .toBe(1);
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
 
     const options = await openOptions(context);
     await options.getByLabel('Site to pause').fill('site.test');
@@ -309,5 +348,166 @@ test.describe('third-party script blocking', () => {
 
     expect(flags.firstPartyLoaded).toBe(true);
     expect(flags.thirdPartyLoaded).toBeUndefined();
+  });
+
+  test('strips tracking parameters from the current URL and link clicks', async () => {
+    await expect
+      .poll(async () =>
+        (await getDynamicRules(context)).some(
+          (rule) => rule.id >= 5000 && rule.id < 6000,
+        ),
+      )
+      .toBe(true);
+
+    await resetPageUrl();
+
+    const page = await openSite(
+      context,
+      '/?utm_source=test&fbclid=abc&keep=1',
+    );
+
+    await expect
+      .poll(() => page.url())
+      .toBe('http://site.test:4173/?keep=1');
+
+    await expect
+      .poll(async () => (await fetchPageUrl()).url)
+      .toBe('/?keep=1');
+
+    await page.getByRole('link', { name: 'Tracking link' }).click();
+    await expect
+      .poll(() => page.url())
+      .toBe('http://site.test:4173/clean?keep=1');
+  });
+
+  test('removes third-party speculation links and ping attributes', async () => {
+    const page = await openSite(context);
+
+    await expect
+      .poll(
+        async () =>
+          page.locator('link[rel="preconnect"][href*="cdn.test"]').count(),
+      )
+      .toBe(0);
+    await expect
+      .poll(
+        async () =>
+          page.locator('link[rel="dns-prefetch"][href*="cdn.test"]').count(),
+      )
+      .toBe(0);
+    await expect
+      .poll(
+        async () =>
+          page.locator('link[rel="prefetch"][href*="cdn.test"]').count(),
+      )
+      .toBe(0);
+
+    await expect(
+      page.locator('link[rel="preconnect"][href*="api.site.test"]'),
+    ).toHaveCount(1);
+    await expect
+      .poll(async () => page.locator('#ping-link').getAttribute('ping'))
+      .toBeNull();
+    await expect
+      .poll(async () => page.locator('img[alt=""]').getAttribute('attributionsrc'))
+      .toBeNull();
+  });
+
+  test('click-to-loads a third-party embed and remembers it per site', async () => {
+    await expect
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
+
+    const page = await openSite(context);
+    const host = page.locator(
+      `[data-scriptshredder-embed="${embedOrigin}"]`,
+    );
+
+    await expect(host).toBeVisible();
+
+    await host.locator('button').click();
+
+    await expect
+      .poll(() =>
+        page.frames().some((frame) => frame.url().includes('widget.test')),
+      )
+      .toBe(true);
+
+    const frame = page.frames().find((value) =>
+      value.url().includes('widget.test'),
+    );
+    expect(frame).toBeDefined();
+    await expect(frame!.getByText('EMBED_LOADED')).toBeVisible();
+
+    const settings = await getSettings(context);
+    expect(settings?.iframeExceptions).toContainEqual({
+      site: 'site.test',
+      frame: embedOrigin,
+    });
+
+    const options = await openOptions(context);
+    await expect(
+      options.getByRole('heading', { name: 'Allowed embeds' }),
+    ).toBeVisible();
+    await expect(
+      options.locator('.exception-script', { hasText: embedOrigin }),
+    ).toBeVisible();
+
+    await options
+      .getByRole('button', {
+        name: `Block ${embedOrigin} on site.test again`,
+      })
+      .click();
+
+    await expect
+      .poll(async () =>
+        (await getDynamicRules(context)).some((rule) => rule.id === 3000),
+      )
+      .toBe(false);
+
+    await page.reload({ waitUntil: 'load' });
+    await expect(
+      page.locator(`[data-scriptshredder-embed="${embedOrigin}"]`),
+    ).toBeVisible();
+  });
+
+  test('sends GPC and can remove the third-party Referer header', async () => {
+    await expect
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
+
+    const page = await openSite(context);
+
+    await resetImageHeaders();
+    await page.reload({ waitUntil: 'load' });
+
+    await expect
+      .poll(async () => (await fetchImageHeaders()).image?.['sec-gpc'])
+      .toBe('1');
+
+    const before = await fetchImageHeaders();
+    expect(before.image?.['referer']).toBeTruthy();
+    expect(before.image?.['x-client-data']).toBeUndefined();
+
+    const options = await openOptions(context);
+    await options
+      .getByRole('switch', { name: 'Remove third-party Referer' })
+      .click();
+
+    await expect
+      .poll(async () =>
+        (await getDynamicRules(context)).some((rule) => rule.id === 4000),
+      )
+      .toBe(true);
+
+    await resetImageHeaders();
+    await page.reload({ waitUntil: 'load' });
+
+    await expect
+      .poll(async () => (await fetchImageHeaders()).image)
+      .not.toBeNull();
+
+    const after = await fetchImageHeaders();
+    expect(after.image?.['referer']).toBeUndefined();
   });
 });
