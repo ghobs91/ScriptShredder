@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ALLOW_GLOBAL_SCRIPT_RULE_ID_BASE,
   ALLOW_IFRAME_RULE_ID_BASE,
   ALLOW_RULE_ID_BASE,
   ALLOW_SCRIPT_RULE_ID_BASE,
@@ -18,6 +19,7 @@ const base: Settings = {
   pausedSites: [],
   scriptExceptions: [],
   iframeExceptions: [],
+  globalScriptExceptions: [],
   hardening: { ...DEFAULT_HARDENING },
 };
 
@@ -97,6 +99,60 @@ describe('buildDynamicRules', () => {
         urlFilter: '|https://cdn.other.test/tracker.js',
         initiatorDomains: ['example.com'],
         resourceTypes: ['script'],
+      },
+    });
+  });
+
+  it('allows every path when the exception is an origin', () => {
+    const rules = buildDynamicRules({
+      ...base,
+      scriptExceptions: [
+        {
+          site: 'example.com',
+          script: 'https://github.githubassets.com/',
+        },
+      ],
+    });
+
+    expect(ruleById(rules, ALLOW_SCRIPT_RULE_ID_BASE)).toEqual({
+      id: ALLOW_SCRIPT_RULE_ID_BASE,
+      priority: 3,
+      action: { type: 'allow' },
+      condition: {
+        // Prefix filters have no path wildcard, so the trailing slash covers
+        // every script on the origin.
+        urlFilter: '|https://github.githubassets.com/',
+        initiatorDomains: ['example.com'],
+        resourceTypes: ['script'],
+      },
+    });
+  });
+
+  it('allows global script hosts for every initiator', () => {
+    const rules = buildDynamicRules({
+      ...base,
+      globalScriptExceptions: [
+        'https://cloudfront.net/',
+        'https://www.google.com/recaptcha/',
+      ],
+    });
+
+    expect(ruleById(rules, ALLOW_GLOBAL_SCRIPT_RULE_ID_BASE)).toEqual({
+      id: ALLOW_GLOBAL_SCRIPT_RULE_ID_BASE,
+      priority: 3,
+      action: { type: 'allow' },
+      condition: {
+        urlFilter: '||cloudfront.net^',
+        resourceTypes: ['script', 'sub_frame'],
+      },
+    });
+    expect(ruleById(rules, ALLOW_GLOBAL_SCRIPT_RULE_ID_BASE + 1)).toEqual({
+      id: ALLOW_GLOBAL_SCRIPT_RULE_ID_BASE + 1,
+      priority: 3,
+      action: { type: 'allow' },
+      condition: {
+        urlFilter: '|https://www.google.com/recaptcha/',
+        resourceTypes: ['script', 'sub_frame'],
       },
     });
   });

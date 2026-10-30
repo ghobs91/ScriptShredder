@@ -3,8 +3,15 @@ import {
   normalizeFrameOrigin,
   normalizeScriptUrl,
   normalizeSiteInput,
+  scriptExceptionCovers,
   siteFromHostname,
 } from './domain';
+import {
+  DEFAULT_GLOBAL_SCRIPT_EXCEPTIONS,
+  globalScriptExceptionCovers,
+  MAX_GLOBAL_SCRIPT_EXCEPTIONS,
+  normalizeGlobalScriptInput,
+} from './globalScripts';
 
 export const SETTINGS_KEY = 'settings';
 export const MAX_PAUSED_SITES = 500;
@@ -57,6 +64,8 @@ export type Settings = {
   pausedSites: string[];
   scriptExceptions: ScriptException[];
   iframeExceptions: IframeException[];
+  /** Script and embed hosts allowed on every site. */
+  globalScriptExceptions: string[];
   hardening: HardeningSettings;
 };
 
@@ -65,6 +74,7 @@ export const DEFAULT_SETTINGS: Settings = {
   pausedSites: [],
   scriptExceptions: [],
   iframeExceptions: [],
+  globalScriptExceptions: [...DEFAULT_GLOBAL_SCRIPT_EXCEPTIONS],
   hardening: DEFAULT_HARDENING,
 };
 
@@ -92,6 +102,7 @@ export function normalizeSettings(value: unknown): Settings {
       pausedSites: [],
       scriptExceptions: [],
       iframeExceptions: [],
+      globalScriptExceptions: [...DEFAULT_GLOBAL_SCRIPT_EXCEPTIONS],
       hardening: normalizeHardening(undefined),
     };
   }
@@ -169,11 +180,26 @@ export function normalizeSettings(value: unknown): Settings {
     )
     .slice(0, MAX_IFRAME_EXCEPTIONS);
 
+  // A missing key means this is an older profile: seed the recommended hosts.
+  // An explicit array (even an empty one) is respected so removals stick.
+  const rawGlobals = record.globalScriptExceptions;
+  const globalExceptions = Array.isArray(rawGlobals)
+    ? rawGlobals.flatMap((value): string[] => {
+        if (typeof value !== 'string') return [];
+        const host = normalizeGlobalScriptInput(value);
+        return host ? [host] : [];
+      })
+    : [...DEFAULT_GLOBAL_SCRIPT_EXCEPTIONS];
+
   return {
     enabled,
     pausedSites: [...new Set(sites)].sort().slice(0, MAX_PAUSED_SITES),
     scriptExceptions: uniqueExceptions.slice(0, MAX_SCRIPT_EXCEPTIONS),
     iframeExceptions: uniqueFrames,
+    globalScriptExceptions: [...new Set(globalExceptions)].slice(
+      0,
+      MAX_GLOBAL_SCRIPT_EXCEPTIONS,
+    ),
     hardening: normalizeHardening(record.hardening),
   };
 }
@@ -205,7 +231,9 @@ export function hasScriptException(
   script: string,
 ): boolean {
   return settings.scriptExceptions.some(
-    (exception) => exception.site === site && exception.script === script,
+    (exception) =>
+      exception.site === site &&
+      scriptExceptionCovers(exception.script, script),
   );
 }
 
@@ -216,5 +244,14 @@ export function hasIframeException(
 ): boolean {
   return settings.iframeExceptions.some(
     (exception) => exception.site === site && exception.frame === frame,
+  );
+}
+
+export function hasGlobalScriptException(
+  settings: Settings,
+  script: string,
+): boolean {
+  return settings.globalScriptExceptions.some((exception) =>
+    globalScriptExceptionCovers(exception, script),
   );
 }

@@ -82,7 +82,11 @@ async function getSettings(context: BrowserContext): Promise<Settings | null> {
 
 async function getPageScripts(
   context: BrowserContext,
-): Promise<{ pageUrl: string; scripts: string[] } | null> {
+): Promise<{
+  pageUrl: string;
+  scripts: string[];
+  activity: { total: number; requests: number };
+} | null> {
   const worker = await getWorker(context);
   return worker.evaluate(async () => {
     const [tab] = await chrome.tabs.query({
@@ -93,7 +97,43 @@ async function getPageScripts(
 
     return (await chrome.tabs.sendMessage(tab.id, {
       type: 'scriptshredder:get-page-scripts',
-    })) as { pageUrl: string; scripts: string[] };
+    })) as {
+      pageUrl: string;
+      scripts: string[];
+      activity: { total: number; requests: number };
+    };
+  });
+}
+
+async function getBadgeText(context: BrowserContext): Promise<string> {
+  const worker = await getWorker(context);
+  return worker.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    if (!tab?.id) return '';
+    return chrome.action.getBadgeText({ tabId: tab.id });
+  });
+}
+
+async function getBadgeSnapshot(
+  context: BrowserContext,
+): Promise<{ badge: string; count: number } | null> {
+  const worker = await getWorker(context);
+  return worker.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    if (!tab?.id) return null;
+
+    const response = (await chrome.tabs.sendMessage(tab.id, {
+      type: 'scriptshredder:get-page-scripts',
+    })) as { activity: { total: number } };
+    const badge = await chrome.action.getBadgeText({ tabId: tab.id });
+
+    return { badge, count: response.activity.total };
   });
 }
 
@@ -162,6 +202,26 @@ test.describe('third-party script blocking', () => {
     expect(flags.firstPartyLoaded).toBe(true);
     expect(flags.sameSiteLoaded).toBe(true);
     expect(flags.thirdPartyLoaded).toBeUndefined();
+  });
+
+  test('toolbar badge matches the blocked and modified action list', async () => {
+    await expect
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
+
+    const page = await openSite(context);
+    await page.waitForTimeout(700);
+
+    await expect
+      .poll(async () => {
+        const snapshot = await getBadgeSnapshot(context);
+        return (
+          snapshot !== null &&
+          snapshot.count > 0 &&
+          snapshot.badge === String(snapshot.count)
+        );
+      })
+      .toBe(true);
   });
 
   test('lists page scripts and records local blocked-script counters', async () => {
@@ -243,6 +303,7 @@ test.describe('third-party script blocking', () => {
 
     await page.waitForTimeout(700);
     expect((await getStats(context))?.total ?? 0).toBe(0);
+    await expect.poll(async () => getBadgeText(context)).toBe('');
   });
 
   test('turning protection off allows all scripts', async () => {
@@ -285,7 +346,10 @@ test.describe('third-party script blocking', () => {
     await expect
       .poll(async () =>
         (await getDynamicRules(context)).some(
-          (rule) => rule.action.type === 'allow',
+          (rule) =>
+            rule.id >= 2000 &&
+            rule.id < 3000 &&
+            rule.action.type === 'allow',
         ),
       )
       .toBe(true);
@@ -311,7 +375,10 @@ test.describe('third-party script blocking', () => {
     await expect
       .poll(async () =>
         (await getDynamicRules(context)).some(
-          (rule) => rule.action.type === 'allow',
+          (rule) =>
+            rule.id >= 2000 &&
+            rule.id < 3000 &&
+            rule.action.type === 'allow',
         ),
       )
       .toBe(false);
@@ -320,6 +387,140 @@ test.describe('third-party script blocking', () => {
     flags = await readFlags(page);
 
     expect(flags.thirdPartyLoaded).toBeUndefined();
+  });
+
+  test('allows every script from an origin on a site, then blocks them again', async () => {
+    await expect
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
+
+    const options = await openOptions(context);
+    const origin = 'http://cdn.test:4173/';
+    const originLabel = 'http://cdn.test:4173/*';
+
+    await options.evaluate(async (script) => {
+      await chrome.storage.local.set({
+        settings: {
+          enabled: true,
+          pausedSites: [],
+          scriptExceptions: [{ site: 'site.test', script }],
+        },
+      });
+    }, origin);
+
+    await expect
+      .poll(async () =>
+        (await getDynamicRules(context)).some(
+          (rule) =>
+            rule.id >= 2000 &&
+            rule.id < 3000 &&
+            rule.action.type === 'allow',
+        ),
+      )
+      .toBe(true);
+
+    let page = await openSite(context);
+    let flags = await readFlags(page);
+
+    expect(flags.firstPartyLoaded).toBe(true);
+    expect(flags.thirdPartyLoaded).toBe(true);
+
+    await page.waitForTimeout(700);
+    expect((await getStats(context))?.total ?? 0).toBe(0);
+
+    await expect(
+      options.locator('.exception-script', { hasText: originLabel }),
+    ).toBeVisible();
+    await options
+      .getByRole('button', {
+        name: `Block ${originLabel} on site.test again`,
+      })
+      .click();
+
+    await expect
+      .poll(async () =>
+        (await getDynamicRules(context)).some(
+          (rule) =>
+            rule.id >= 2000 &&
+            rule.id < 3000 &&
+            rule.action.type === 'allow',
+        ),
+      )
+      .toBe(false);
+
+    page = await openSite(context);
+    flags = await readFlags(page);
+
+    expect(flags.thirdPartyLoaded).toBeUndefined();
+  });
+
+  test('allows a host on every site, then blocks it everywhere again', async () => {
+    await expect
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
+
+    const options = await openOptions(context);
+    await options.getByLabel('Host to allow everywhere').fill('cdn.test');
+    await options.getByRole('button', { name: 'Allow everywhere' }).click();
+
+    await expect(
+      options.getByText(/Allowing https:\/\/cdn\.test\/\* on every site/),
+    ).toBeVisible();
+    await expect
+      .poll(async () =>
+        (await getDynamicRules(context)).some(
+          (rule) => rule.condition.urlFilter === '||cdn.test^',
+        ),
+      )
+      .toBe(true);
+
+    let page = await openSite(context);
+    let flags = await readFlags(page);
+
+    expect(flags.firstPartyLoaded).toBe(true);
+    expect(flags.thirdPartyLoaded).toBe(true);
+
+    await page.waitForTimeout(700);
+    expect((await getStats(context))?.total ?? 0).toBe(0);
+
+    await options
+      .getByRole('button', {
+        name: 'Stop allowing https://cdn.test/* everywhere',
+      })
+      .click();
+
+    await expect
+      .poll(async () =>
+        (await getDynamicRules(context)).some(
+          (rule) => rule.condition.urlFilter === '||cdn.test^',
+        ),
+      )
+      .toBe(false);
+
+    page = await openSite(context);
+    flags = await readFlags(page);
+
+    expect(flags.firstPartyLoaded).toBe(true);
+    expect(flags.thirdPartyLoaded).toBeUndefined();
+  });
+
+  test('loads a globally allowed third-party embed without a placeholder', async () => {
+    await expect
+      .poll(async () => Boolean(await getBlockRule(context)))
+      .toBe(true);
+
+    const options = await openOptions(context);
+    await options.getByLabel('Host to allow everywhere').fill('widget.test');
+    await options.getByRole('button', { name: 'Allow everywhere' }).click();
+    await expect(
+      options.getByText(/Allowing https:\/\/widget\.test\/\* on every site/),
+    ).toBeVisible();
+
+    const page = await openSite(context);
+    const frame = page.frameLocator('iframe[title="Test embed"]');
+
+    await expect(frame.getByText('EMBED_LOADED')).toBeVisible();
+    await expect(page.locator('[data-scriptshredder-embed]')).toHaveCount(0);
   });
 
   test('removing a paused site blocks it again', async () => {

@@ -2,7 +2,13 @@ import { useState, type FormEvent } from 'react';
 import { browser } from 'wxt/browser';
 import { ShieldIcon } from '../../components/icons';
 import { Toggle } from '../../components/Toggle';
-import { normalizeSiteInput } from '../../lib/domain';
+import { isOriginScriptUrl, normalizeSiteInput } from '../../lib/domain';
+import {
+  DEFAULT_GLOBAL_SCRIPT_EXCEPTIONS,
+  globalScriptExceptionCovers,
+  MAX_GLOBAL_SCRIPT_EXCEPTIONS,
+  normalizeGlobalScriptInput,
+} from '../../lib/globalScripts';
 import { requestRuleSync, requestStatsReset } from '../../lib/messaging';
 import {
   MAX_PAUSED_SITES,
@@ -19,10 +25,27 @@ type Message = {
   text: string;
 };
 
+/**
+ * Origin exceptions are stored as https://host/ and cover every path, so show
+ * them as https://host/* to distinguish them from a root-level script.
+ */
+function formatScriptException(script: string): string {
+  return isOriginScriptUrl(script) ? `${script.slice(0, -1)}/*` : script;
+}
+
+/**
+ * Global entries use a trailing slash for "this host and every path", so show
+ * them as https://host/* for clarity.
+ */
+function formatGlobalException(host: string): string {
+  return host.endsWith('/') ? `${host.slice(0, -1)}/*` : host;
+}
+
 export function App() {
   const [settings, setSettings] = useSettings();
   const stats = useStats();
   const [input, setInput] = useState('');
+  const [globalInput, setGlobalInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<Message | null>(null);
 
@@ -168,7 +191,98 @@ export function App() {
     if (next) {
       setMessage({
         tone: 'success',
-        text: `Blocking resumed for ${script} on ${site}.`,
+        text: `Blocking resumed for ${formatScriptException(script)} on ${site}.`,
+      });
+    }
+  };
+
+  const addGlobalHost = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy || !globalInput.trim()) return;
+
+    const host = normalizeGlobalScriptInput(globalInput);
+
+    if (!host) {
+      setMessage({
+        tone: 'error',
+        text: 'Enter a host like cdn.example.com or a full https:// URL.',
+      });
+      return;
+    }
+
+    if (settings.globalScriptExceptions.includes(host)) {
+      setMessage({
+        tone: 'error',
+        text: `${formatGlobalException(host)} is already allowed everywhere.`,
+      });
+      return;
+    }
+
+    if (
+      settings.globalScriptExceptions.length >= MAX_GLOBAL_SCRIPT_EXCEPTIONS
+    ) {
+      setMessage({
+        tone: 'error',
+        text: `You can allow up to ${MAX_GLOBAL_SCRIPT_EXCEPTIONS} hosts everywhere.`,
+      });
+      return;
+    }
+
+    const next = await commit((current) => ({
+      ...current,
+      // Per-site exceptions for this host are now redundant.
+      scriptExceptions: current.scriptExceptions.filter(
+        (exception) => !globalScriptExceptionCovers(host, exception.script),
+      ),
+      globalScriptExceptions: [...current.globalScriptExceptions, host],
+    }));
+
+    if (next) {
+      setGlobalInput('');
+      setMessage({
+        tone: 'success',
+        text: `Allowing ${formatGlobalException(host)} on every site. Reload open tabs to apply it.`,
+      });
+    }
+  };
+
+  const removeGlobalHost = async (host: string) => {
+    if (busy) return;
+    setMessage(null);
+
+    const next = await commit((current) => ({
+      ...current,
+      globalScriptExceptions: current.globalScriptExceptions.filter(
+        (value) => value !== host,
+      ),
+    }));
+
+    if (next) {
+      setMessage({
+        tone: 'success',
+        text: `Blocking ${formatGlobalException(host)} everywhere again.`,
+      });
+    }
+  };
+
+  const restoreDefaultGlobalHosts = async () => {
+    if (busy) return;
+    setMessage(null);
+
+    const next = await commit((current) => ({
+      ...current,
+      globalScriptExceptions: [
+        ...new Set([
+          ...current.globalScriptExceptions,
+          ...DEFAULT_GLOBAL_SCRIPT_EXCEPTIONS,
+        ]),
+      ],
+    }));
+
+    if (next) {
+      setMessage({
+        tone: 'success',
+        text: 'Recommended content and captcha hosts are allowed everywhere again.',
       });
     }
   };
@@ -237,6 +351,9 @@ export function App() {
   };
 
   const pausedCount = settings.pausedSites.length;
+  const missingDefaultGlobals = DEFAULT_GLOBAL_SCRIPT_EXCEPTIONS.filter(
+    (host) => !settings.globalScriptExceptions.includes(host),
+  );
 
   const exceptionGroups = new Map<string, string[]>();
   for (const exception of settings.scriptExceptions) {
@@ -458,22 +575,22 @@ export function App() {
         <div className="row">
           <div className="row-copy">
             <h3>
-              Individual exceptions
+              Script exceptions
               <span className="count-badge">
                 {settings.scriptExceptions.length}
               </span>
             </h3>
             <p className="note">
-              Specific third-party scripts allowed on a site. Pausing a whole
-              site takes precedence.
+              Specific third-party scripts or whole hosts allowed on a site.
+              Pausing a whole site takes precedence.
             </p>
           </div>
         </div>
 
         {groupedExceptions.length === 0 ? (
           <p className="empty">
-            No individual exceptions. Use the ScriptShredder popup on a site to
-            allow a specific third-party script.
+            No script exceptions. Use the ScriptShredder popup on a site to
+            allow a third-party script or host.
           </p>
         ) : (
           <div className="exception-groups">
@@ -481,27 +598,107 @@ export function App() {
               <div className="exception-group" key={site}>
                 <h4>{site}</h4>
                 <ul>
-                  {scripts.map((script) => (
-                    <li key={script}>
-                      <span className="exception-script" title={script}>
-                        {script}
-                      </span>
-                      <button
-                        type="button"
-                        className="remove"
-                        onClick={() => void removeException(site, script)}
-                        disabled={busy}
-                        aria-label={`Block ${script} on ${site} again`}
-                        title={`Block ${script} on ${site} again`}
-                      >
-                        ×
-                      </button>
-                    </li>
-                  ))}
+                  {scripts.map((script) => {
+                    const label = formatScriptException(script);
+
+                    return (
+                      <li key={script}>
+                        <span className="exception-script" title={label}>
+                          {label}
+                        </span>
+                        <button
+                          type="button"
+                          className="remove"
+                          onClick={() => void removeException(site, script)}
+                          disabled={busy}
+                          aria-label={`Block ${label} on ${site} again`}
+                          title={`Block ${label} on ${site} again`}
+                        >
+                          ×
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             ))}
           </div>
+        )}
+      </section>
+
+      <section className="card">
+        <div className="row">
+          <div className="row-copy">
+            <h3>
+              Always-allowed hosts
+              <span className="count-badge">
+                {settings.globalScriptExceptions.length}
+              </span>
+            </h3>
+            <p className="note">
+              Scripts and embeds from these hosts load on every site. The
+              recommended defaults cover common content CDNs, captcha
+              providers, and hosted site builders. Remove any you don&apos;t
+              want, or add your own.
+            </p>
+          </div>
+          {missingDefaultGlobals.length > 0 ? (
+            <button
+              type="button"
+              className="text-action"
+              onClick={() => void restoreDefaultGlobalHosts()}
+              disabled={busy}
+            >
+              Restore defaults
+            </button>
+          ) : null}
+        </div>
+
+        <form
+          className="add-form"
+          onSubmit={(event) => void addGlobalHost(event)}
+        >
+          <input
+            type="text"
+            value={globalInput}
+            onChange={(event) => setGlobalInput(event.target.value)}
+            placeholder="cdn.example.com"
+            aria-label="Host to allow everywhere"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            disabled={busy}
+          />
+          <button type="submit" disabled={busy || !globalInput.trim()}>
+            Allow everywhere
+          </button>
+        </form>
+
+        {settings.globalScriptExceptions.length === 0 ? (
+          <p className="empty">
+            No hosts allowed everywhere. Third-party scripts and embeds are
+            blocked on every site.
+          </p>
+        ) : (
+          <ul className="site-list">
+            {settings.globalScriptExceptions.map((host) => (
+              <li key={host}>
+                <span className="mono site-name" title={host}>
+                  {formatGlobalException(host)}
+                </span>
+                <button
+                  type="button"
+                  className="remove"
+                  onClick={() => void removeGlobalHost(host)}
+                  disabled={busy}
+                  aria-label={`Stop allowing ${formatGlobalException(host)} everywhere`}
+                  title={`Block ${formatGlobalException(host)} everywhere again`}
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
         )}
       </section>
 
@@ -642,8 +839,16 @@ export function App() {
             <strong>Pause a site or allow one script.</strong> Paused domains and
             individual exceptions are stored locally and survive restarts.
             Reload open tabs after changing a setting so the new rules apply.
-            The popup also lists the third-party scripts detected on the
-            current page, with an Allow action for individual scripts.
+            The popup groups detected third-party scripts by host, so one
+            Allow all action covers every asset from that host on the current
+            site, while individual paths can still be allowed separately.
+          </li>
+          <li>
+            <strong>Trusted content hosts work everywhere.</strong> The
+            always-allowed list covers content CDNs, captcha providers, and
+            hosted site builders. Those hosts load on every site, including
+            their embeds, so captchas and common libraries keep working. Use
+            Everywhere in the popup to add a host, or manage the list above.
           </li>
           <li>
             <strong>Hardening closes other channels.</strong> Third-party
@@ -664,9 +869,15 @@ export function App() {
           <code>eval</code>, and JavaScript downloaded as data and then executed
           are outside a network-level blocklist&apos;s reach. Dynamic imports
           and workers aren&apos;t represented as script elements, so they may be
-          blocked without appearing in the page list or counters. Click-to-load
-          covers iframes in the top frame; headers and tracking-parameter
-          cleanup depend on the browser&apos;s declarativeNetRequest support.
+          blocked without appearing in the page list or counters. The toolbar
+          badge counts the blocked and modified actions listed in the popup:
+          blocked scripts and embeds, removed ping/attribution attributes,
+          third-party requests with privacy headers reduced, requests sent
+          Sec-GPC, and tracking-parameter cleanups. It only covers what the page can
+          observe; sendBeacon, CSP reports, dynamic imports, and worker
+          requests are not counted. Click-to-load covers iframes in the top
+          frame; headers and tracking-parameter cleanup depend on the
+          browser&apos;s declarativeNetRequest support.
         </p>
       </section>
 

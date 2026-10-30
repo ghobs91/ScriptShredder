@@ -58,24 +58,12 @@ export function normalizeSiteInput(input: string): string | null {
   return siteFromHostname(url.hostname);
 }
 
-/**
- * Normalizes a concrete script URL for display, matching, and local counters.
- * Query strings and fragments are dropped so cache-busting variants collapse
- * into one entry.
- */
-export function normalizeScriptUrl(value: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return null;
-  }
-
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-  if (!url.hostname) return null;
-
-  return `${url.origin}${url.pathname || '/'}`;
-}
+export {
+  isOriginScriptUrl,
+  normalizeScriptUrl,
+  scriptExceptionCovers,
+  scriptOriginUrl,
+} from './scriptUrl';
 
 /**
  * Normalizes an iframe URL to its origin for per-site click-to-load

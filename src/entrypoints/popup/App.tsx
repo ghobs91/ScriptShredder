@@ -1,13 +1,20 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { browser } from 'wxt/browser';
+import { ActionList } from '../../components/ActionList';
 import { ShieldIcon } from '../../components/icons';
 import { ScriptList } from '../../components/ScriptList';
 import { Toggle } from '../../components/Toggle';
+import { EMPTY_ACTIVITY, type PageActivity } from '../../lib/actions';
 import { siteFromUrl } from '../../lib/domain';
+import {
+  globalScriptExceptionCovers,
+  normalizeGlobalScriptInput,
+} from '../../lib/globalScripts';
 import { getPageScripts, requestRuleSync } from '../../lib/messaging';
 import {
   describePageScripts,
   type PageScript,
+  type ScriptHostGroup,
 } from '../../lib/pageScripts';
 import {
   hasScriptException,
@@ -22,6 +29,7 @@ export function App() {
   const [site, setSite] = useState<string | null>(null);
   const [pageUrl, setPageUrl] = useState('');
   const [rawScripts, setRawScripts] = useState<string[] | null>(null);
+  const [activity, setActivity] = useState<PageActivity>(EMPTY_ACTIVITY);
   const [scanError, setScanError] = useState(false);
   const [scanNonce, setScanNonce] = useState(0);
   const [tabId, setTabId] = useState<number | null>(null);
@@ -52,6 +60,7 @@ export function App() {
 
     let active = true;
     setRawScripts(null);
+    setActivity(EMPTY_ACTIVITY);
     setScanError(false);
 
     getPageScripts(tabId)
@@ -59,12 +68,14 @@ export function App() {
         if (!active) return;
         setPageUrl(response.pageUrl);
         setRawScripts(response.scripts);
+        setActivity(response.activity);
         setSite((current) => current ?? siteFromUrl(response.pageUrl));
       })
       .catch(() => {
         if (!active) return;
         setScanError(true);
         setRawScripts([]);
+        setActivity(EMPTY_ACTIVITY);
       });
 
     return () => {
@@ -72,11 +83,23 @@ export function App() {
     };
   }, [tabId, scanNonce]);
 
+  const effectiveSite = site ?? siteFromUrl(pageUrl);
+  const pageSource =
+    pageUrl || (effectiveSite ? `https://${effectiveSite}/` : '');
+  // Describing scripts parses every URL and checks exceptions, so keep it off
+  // the render path when unrelated state (busy, error) changes.
+  const pageScripts = useMemo(
+    () =>
+      settings
+        ? describePageScripts(pageSource, rawScripts ?? [], settings)
+        : [],
+    [pageSource, rawScripts, settings],
+  );
+
   if (!settings) {
     return <div className="popup popup-loading">Loading ScriptShredder…</div>;
   }
 
-  const effectiveSite = site ?? siteFromUrl(pageUrl);
   const paused = isSitePaused(settings, effectiveSite);
   const state = !settings.enabled
     ? 'off'
@@ -86,13 +109,6 @@ export function App() {
         ? 'paused'
         : 'active';
 
-  const pageSource =
-    pageUrl || (effectiveSite ? `https://${effectiveSite}/` : '');
-  const pageScripts = describePageScripts(
-    pageSource,
-    rawScripts ?? [],
-    settings,
-  );
   const canManageScripts = settings.enabled && !paused;
   const scriptsLoading =
     tabId !== null && rawScripts === null && !scanError;
@@ -160,6 +176,48 @@ export function App() {
             { site: effectiveSite, script: script.script },
           ],
     }));
+  };
+
+  const toggleScriptHost = (group: ScriptHostGroup) => {
+    if (!effectiveSite || busy || !canManageScripts) return;
+
+    void commit((current) => {
+      // Origin exceptions replace any per-script exceptions on that origin.
+      const remaining = current.scriptExceptions.filter(
+        (exception) =>
+          !(
+            exception.site === effectiveSite &&
+            exception.script.startsWith(group.origin)
+          ),
+      );
+
+      return {
+        ...current,
+        scriptExceptions: group.allowed
+          ? remaining
+          : [...remaining, { site: effectiveSite, script: group.origin }],
+      };
+    });
+  };
+
+  const allowEverywhere = (group: ScriptHostGroup) => {
+    if (busy || !canManageScripts) return;
+
+    const host = normalizeGlobalScriptInput(group.origin);
+    if (!host) return;
+
+    void commit((current) => {
+      if (current.globalScriptExceptions.includes(host)) return current;
+
+      return {
+        ...current,
+        // Per-site exceptions for this host are now redundant.
+        scriptExceptions: current.scriptExceptions.filter(
+          (exception) => !globalScriptExceptionCovers(host, exception.script),
+        ),
+        globalScriptExceptions: [...current.globalScriptExceptions, host],
+      };
+    });
   };
 
   let title: string;
@@ -251,11 +309,21 @@ export function App() {
           busy={busy}
           note={scriptNote}
           onToggle={toggleScript}
+          onToggleHost={toggleScriptHost}
+          onAllowEverywhere={allowEverywhere}
           onRefresh={() => setScanNonce((value) => value + 1)}
           onReload={() => {
             if (tabId !== null) void browser.tabs.reload(tabId);
           }}
         />
+
+        {canManageScripts && effectiveSite ? (
+          <ActionList
+            activity={activity}
+            loading={scriptsLoading}
+            error={scanError}
+          />
+        ) : null}
 
         {error ? (
           <p className="error" role="alert">

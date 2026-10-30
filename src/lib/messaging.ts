@@ -1,4 +1,9 @@
 import { browser } from 'wxt/browser';
+import {
+  EMPTY_ACTIVITY,
+  isPageActivity,
+  type PageActivity,
+} from './actions';
 import type { HardeningSettings } from './settings';
 
 export const SYNC_RULES_MESSAGE = 'scriptshredder:sync-rules' as const;
@@ -8,6 +13,7 @@ export const ALLOW_IFRAME_MESSAGE = 'scriptshredder:allow-iframe' as const;
 export const RECORD_BLOCKED_SCRIPTS_MESSAGE =
   'scriptshredder:record-blocked-scripts' as const;
 export const RESET_STATS_MESSAGE = 'scriptshredder:reset-stats' as const;
+export const SYNC_BADGE_MESSAGE = 'scriptshredder:sync-badge' as const;
 
 export type SyncRulesMessage = {
   type: typeof SYNC_RULES_MESSAGE;
@@ -38,9 +44,15 @@ export type ResetStatsMessage = {
   type: typeof RESET_STATS_MESSAGE;
 };
 
+export type SyncBadgeMessage = {
+  type: typeof SYNC_BADGE_MESSAGE;
+  count: number;
+};
+
 export type PageScriptsResponse = {
   pageUrl: string;
   scripts: string[];
+  activity: PageActivity;
 };
 
 export type PageContext = {
@@ -49,6 +61,8 @@ export type PageContext = {
   paused: boolean;
   hardening: HardeningSettings;
   iframeExceptions: string[];
+  scriptExceptions: string[];
+  globalScriptExceptions: string[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -90,6 +104,16 @@ export function isResetStatsMessage(value: unknown): value is ResetStatsMessage 
   return isRecord(value) && value.type === RESET_STATS_MESSAGE;
 }
 
+export function isSyncBadgeMessage(value: unknown): value is SyncBadgeMessage {
+  return (
+    isRecord(value) &&
+    value.type === SYNC_BADGE_MESSAGE &&
+    typeof value.count === 'number' &&
+    Number.isFinite(value.count) &&
+    value.count >= 0
+  );
+}
+
 export function isRecordBlockedScriptsMessage(
   value: unknown,
 ): value is RecordBlockedScriptsMessage {
@@ -123,17 +147,22 @@ export async function getPageScripts(
     type: GET_PAGE_SCRIPTS_MESSAGE,
   } satisfies GetPageScriptsMessage)) as unknown;
 
-  if (!isRecord(response)) return { pageUrl: '', scripts: [] };
+  if (isRecord(response)) {
+    return {
+      pageUrl:
+        typeof response.pageUrl === 'string' ? response.pageUrl : '',
+      scripts: Array.isArray(response.scripts)
+        ? response.scripts.filter(
+            (script): script is string => typeof script === 'string',
+          )
+        : [],
+      activity: isPageActivity(response.activity)
+        ? response.activity
+        : EMPTY_ACTIVITY,
+    };
+  }
 
-  return {
-    pageUrl:
-      typeof response.pageUrl === 'string' ? response.pageUrl : '',
-    scripts: Array.isArray(response.scripts)
-      ? response.scripts.filter(
-          (script): script is string => typeof script === 'string',
-        )
-      : [],
-  };
+  return { pageUrl: '', scripts: [], activity: EMPTY_ACTIVITY };
 }
 
 /**
@@ -191,4 +220,15 @@ export async function requestStatsReset(): Promise<void> {
   if (response?.ok === false) {
     throw new Error(response.error ?? 'Stats reset failed');
   }
+}
+
+/**
+ * Content-script side: updates the toolbar badge for this tab. Only the count
+ * is sent to the background; action URLs stay in the page.
+ */
+export async function sendBadgeCount(count: number): Promise<void> {
+  await browser.runtime.sendMessage({
+    type: SYNC_BADGE_MESSAGE,
+    count,
+  } satisfies SyncBadgeMessage);
 }

@@ -1,10 +1,13 @@
 import { browser } from 'wxt/browser';
 import { defineContentScript } from 'wxt/utils/define-content-script';
+import { buildPageActions, summarizePageActions } from '../lib/actions';
+import { globalScriptExceptionCovers } from '../lib/globalScripts';
 import {
   allowIframe,
   getPageContext,
   isGetPageScriptsMessage,
   recordPageScripts,
+  sendBadgeCount,
   type PageContext,
   type PageScriptsResponse,
 } from '../lib/messaging';
@@ -27,6 +30,9 @@ const SPECULATION_RELS = new Set([
 ]);
 
 const MAX_SEEN_SCRIPTS = 500;
+const MAX_OBSERVED_RESOURCES = 1000;
+const MAX_CLEANUPS = 100;
+const ACTION_SYNC_DELAY = 400;
 
 const EMBED_STYLES = `
 :host { display: block; }
@@ -96,9 +102,106 @@ export default defineContentScript({
     const seen = new Set<string>();
     const pending = new Set<string>();
     const processedIframes = new WeakSet<HTMLIFrameElement>();
+    const blockedFrames: string[] = [];
+    const beacons = new Set<string>();
+    const resources: string[] = [];
+    const cleanups: Array<{ from: string; to: string }> = [];
+    const cleanupKeys = new Set<string>();
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
+    let actionTimer: ReturnType<typeof setTimeout> | undefined;
     let pageContext: PageContext | null = null;
     let contextRequest = 0;
+
+    function currentActivity() {
+      const context = pageContext;
+      if (!context?.site) return summarizePageActions([]);
+
+      return summarizePageActions(
+        buildPageActions({
+          pageUrl: location.href,
+          site: context.site,
+          enabled: context.enabled,
+          paused: context.paused,
+          hardening: context.hardening,
+          scriptExceptions: context.scriptExceptions ?? [],
+          globalScriptExceptions: context.globalScriptExceptions ?? [],
+          scripts: [...seen],
+          frames: blockedFrames,
+          beacons: [...beacons],
+          resources,
+          cleanups,
+        }),
+      );
+    }
+
+    function scheduleActionSync(): void {
+      if (actionTimer !== undefined) return;
+      actionTimer = setTimeout(() => {
+        actionTimer = undefined;
+        void syncActionBadge();
+      }, ACTION_SYNC_DELAY);
+    }
+
+    async function syncActionBadge(): Promise<void> {
+      try {
+        await sendBadgeCount(currentActivity().total);
+      } catch {
+        // The background may be unavailable while the extension updates.
+      }
+    }
+
+    function addResource(entry: PerformanceEntry): void {
+      if (resources.length >= MAX_OBSERVED_RESOURCES) return;
+
+      let url: URL;
+      try {
+        url = new URL(entry.name);
+      } catch {
+        return;
+      }
+
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+
+      resources.push(`${url.origin}${url.pathname || '/'}`);
+      scheduleActionSync();
+    }
+
+    function recordCleanup(from: string, to: string): void {
+      if (from === to) return;
+
+      const key = `${from}\n${to}`;
+      if (cleanupKeys.has(key) || cleanups.length >= MAX_CLEANUPS) return;
+
+      cleanupKeys.add(key);
+      cleanups.push({ from, to });
+      scheduleActionSync();
+    }
+
+    function addBeaconValue(value: string | null): void {
+      if (!value) return;
+
+      for (const part of value.trim().split(/\s+/)) {
+        if (!part) continue;
+
+        try {
+          const url = new URL(part, location.href);
+          if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+
+          const href = `${url.origin}${url.pathname || '/'}`;
+          if (beacons.has(href)) continue;
+
+          beacons.add(href);
+          scheduleActionSync();
+        } catch {
+          // Ignore malformed ping/attribution values.
+        }
+      }
+    }
+
+    function captureBeacons(element: Element): void {
+      addBeaconValue(element.getAttribute('ping'));
+      addBeaconValue(element.getAttribute('attributionsrc'));
+    }
 
     function scheduleFlush(): void {
       if (flushTimer !== undefined) return;
@@ -147,6 +250,7 @@ export default defineContentScript({
       seen.add(href);
       pending.add(href);
       scheduleFlush();
+      scheduleActionSync();
     }
 
     function addScript(script: HTMLScriptElement): void {
@@ -192,6 +296,12 @@ export default defineContentScript({
       return host !== site && !host.endsWith(`.${site}`);
     }
 
+    function isGloballyAllowed(value: string): boolean {
+      return (pageContext?.globalScriptExceptions ?? []).some((exception) =>
+        globalScriptExceptionCovers(exception, value),
+      );
+    }
+
     function cssSize(value: string | null, fallback: string): string {
       if (!value) return fallback;
       const trimmed = value.trim();
@@ -204,6 +314,8 @@ export default defineContentScript({
       const clean = stripTrackingParams(location.href);
       if (clean === location.href) return;
 
+      recordCleanup(location.href, clean);
+
       try {
         history.replaceState(history.state, '', clean);
       } catch {
@@ -215,13 +327,17 @@ export default defineContentScript({
       if (!pageContext?.hardening.stripTrackingParams || !isActive()) return;
 
       const clean = stripTrackingParams(anchor.href);
-      if (clean !== anchor.href) anchor.href = clean;
+      if (clean !== anchor.href) {
+        recordCleanup(anchor.href, clean);
+        anchor.href = clean;
+      }
     }
 
     function removeTrackingAttributes(root: ParentNode): void {
       if (!isActive() || !pageContext?.hardening.blockBeacons) return;
 
       if (root instanceof Element) {
+        captureBeacons(root);
         if (root instanceof HTMLAnchorElement || root instanceof HTMLAreaElement) {
           root.removeAttribute('ping');
         }
@@ -229,6 +345,7 @@ export default defineContentScript({
       }
 
       for (const element of root.querySelectorAll('[ping], [attributionsrc]')) {
+        captureBeacons(element);
         element.removeAttribute('ping');
         element.removeAttribute('attributionsrc');
       }
@@ -290,8 +407,11 @@ export default defineContentScript({
       const source = sourceUrl.href;
       if (!isThirdParty(source)) return;
       if (pageContext.iframeExceptions?.includes(origin)) return;
+      if (isGloballyAllowed(source)) return;
 
       processedIframes.add(iframe);
+      if (!blockedFrames.includes(source)) blockedFrames.push(source);
+      scheduleActionSync();
       const computed = getComputedStyle(iframe);
       const rect = iframe.getBoundingClientRect();
       const declaredWidth = iframe.getAttribute('width');
@@ -360,6 +480,10 @@ export default defineContentScript({
 
         void allowIframe(site, origin)
           .then(() => {
+            const index = blockedFrames.indexOf(source);
+            if (index >= 0) blockedFrames.splice(index, 1);
+            scheduleActionSync();
+
             host.remove();
             if (!iframe.isConnected) return;
 
@@ -446,6 +570,16 @@ export default defineContentScript({
       }
 
       applyDomHardening();
+      void syncActionBadge();
+    }
+
+    const resourceObserver = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) addResource(entry);
+    });
+    try {
+      resourceObserver.observe({ type: 'resource', buffered: true });
+    } catch {
+      // Resource Timing is unavailable; scripts and DOM actions still work.
     }
 
     const observer = new MutationObserver((mutations) => {
@@ -485,6 +619,9 @@ export default defineContentScript({
 
     scanDocument();
     void refreshContext();
+    // Clear any badge left by the previous document before the new context
+    // and resource entries arrive.
+    void syncActionBadge();
 
     window.addEventListener(
       'click',
@@ -517,6 +654,7 @@ export default defineContentScript({
         scanDocument();
         cleanCurrentUrl();
         void flush();
+        void syncActionBadge();
       },
       { once: true },
     );
@@ -524,6 +662,7 @@ export default defineContentScript({
       scanDocument();
       cleanCurrentUrl();
       void flush();
+      void syncActionBadge();
     });
     window.addEventListener('pagehide', () => {
       void flush();
@@ -535,6 +674,7 @@ export default defineContentScript({
       sendResponse({
         pageUrl: location.href,
         scripts: [...seen],
+        activity: currentActivity(),
       } satisfies PageScriptsResponse);
 
       return false;

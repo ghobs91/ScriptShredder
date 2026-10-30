@@ -1,4 +1,5 @@
 import type { Browser } from 'wxt/browser';
+import { globalScriptRuleFilter } from './globalScripts';
 import type { Settings } from './settings';
 import { TRACKING_PARAM_NAMES } from './tracking';
 
@@ -13,6 +14,7 @@ export const X_CLIENT_DATA_RULE_ID = 4002;
 export const GPC_RULE_ID = 4003;
 export const TRACKING_PARAM_RULE_ID_BASE = 5000;
 export const TRACKING_PARAM_CHUNK_SIZE = 8;
+export const ALLOW_GLOBAL_SCRIPT_RULE_ID_BASE = 6000;
 
 const SUBRESOURCE_TYPES: `${Browser.declarativeNetRequest.ResourceType}`[] = [
   'sub_frame',
@@ -136,6 +138,23 @@ export function buildDynamicRules(
         urlFilter: `|${exception.script}`,
         initiatorDomains: [exception.site],
         resourceTypes: ['script'],
+      },
+    });
+  }
+
+  const globalExceptions = [...new Set(settings.globalScriptExceptions)].sort();
+  for (const [index, exception] of globalExceptions.entries()) {
+    const urlFilter = globalScriptRuleFilter(exception);
+    if (!urlFilter) continue;
+
+    rules.push({
+      id: ALLOW_GLOBAL_SCRIPT_RULE_ID_BASE + index,
+      priority: 3,
+      action: { type: 'allow' },
+      condition: {
+        // Global exceptions apply to every initiator, so no initiatorDomains.
+        urlFilter,
+        resourceTypes: ['script', 'sub_frame'],
       },
     });
   }

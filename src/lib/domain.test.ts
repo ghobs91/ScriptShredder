@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isOriginScriptUrl,
   normalizeFrameOrigin,
   normalizeScriptUrl,
   normalizeSiteInput,
+  scriptOriginUrl,
   siteFromHostname,
   siteFromUrl,
 } from './domain';
@@ -97,6 +99,38 @@ describe('normalizeScriptUrl', () => {
     expect(normalizeScriptUrl('blob:https://example.com/id')).toBeNull();
     expect(normalizeScriptUrl('javascript:alert(1)')).toBeNull();
     expect(normalizeScriptUrl('not a url')).toBeNull();
+  });
+});
+
+describe('scriptOriginUrl', () => {
+  it('returns the origin of a script URL with a trailing slash', () => {
+    expect(
+      scriptOriginUrl('https://github.githubassets.com/assets/app.js?v=1'),
+    ).toBe('https://github.githubassets.com/');
+    expect(scriptOriginUrl('http://localhost:3000/a.js')).toBe(
+      'http://localhost:3000/',
+    );
+    expect(scriptOriginUrl('https://EXAMPLE.com')).toBe('https://example.com/');
+  });
+
+  it('rejects non-http script URLs', () => {
+    expect(scriptOriginUrl('data:text/javascript,alert(1)')).toBeNull();
+    expect(scriptOriginUrl('blob:https://example.com/id')).toBeNull();
+    expect(scriptOriginUrl('not a url')).toBeNull();
+  });
+});
+
+describe('isOriginScriptUrl', () => {
+  it('detects exceptions that cover a whole origin', () => {
+    expect(isOriginScriptUrl('https://cdn.test/')).toBe(true);
+    expect(isOriginScriptUrl('https://cdn.test')).toBe(true);
+    expect(isOriginScriptUrl('http://localhost:3000/')).toBe(true);
+  });
+
+  it('rejects exceptions for a specific path', () => {
+    expect(isOriginScriptUrl('https://cdn.test/app.js')).toBe(false);
+    expect(isOriginScriptUrl('https://cdn.test/assets/')).toBe(false);
+    expect(isOriginScriptUrl('not a url')).toBe(false);
   });
 });
 

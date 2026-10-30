@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_HARDENING, normalizeSettings } from './settings';
+import { DEFAULT_GLOBAL_SCRIPT_EXCEPTIONS } from './globalScripts';
+import {
+  DEFAULT_HARDENING,
+  hasGlobalScriptException,
+  hasScriptException,
+  normalizeSettings,
+} from './settings';
 
 const defaults = {
   enabled: true,
   pausedSites: [],
   scriptExceptions: [],
   iframeExceptions: [],
+  globalScriptExceptions: [...DEFAULT_GLOBAL_SCRIPT_EXCEPTIONS],
   hardening: { ...DEFAULT_HARDENING },
 };
 
@@ -93,6 +100,48 @@ describe('normalizeSettings', () => {
     ]);
   });
 
+  it('normalizes and deduplicates global script exceptions', () => {
+    const settings = normalizeSettings({
+      globalScriptExceptions: [
+        'cloudfront.net',
+        'https://cdn.other.test',
+        'https://www.google.com/recaptcha/',
+        'cloudfront.net',
+        'not a host',
+      ],
+    });
+
+    expect(settings.globalScriptExceptions).toEqual([
+      'https://cloudfront.net/',
+      'https://cdn.other.test/',
+      'https://www.google.com/recaptcha/',
+    ]);
+  });
+
+  it('keeps an explicit empty global list instead of re-adding defaults', () => {
+    expect(
+      normalizeSettings({ globalScriptExceptions: [] }).globalScriptExceptions,
+    ).toEqual([]);
+  });
+
+  it('seeds the recommended global hosts when the key is missing', () => {
+    expect(normalizeSettings({ enabled: true }).globalScriptExceptions).toEqual(
+      [...DEFAULT_GLOBAL_SCRIPT_EXCEPTIONS],
+    );
+  });
+
+  it('normalizes an origin exception to a trailing-slash URL', () => {
+    expect(
+      normalizeSettings({
+        scriptExceptions: [
+          { site: 'example.com', script: 'https://cdn.other.test' },
+        ],
+      }).scriptExceptions,
+    ).toEqual([
+      { site: 'example.com', script: 'https://cdn.other.test/' },
+    ]);
+  });
+
   it('normalizes hardening defaults and boolean overrides', () => {
     expect(
       normalizeSettings({
@@ -110,5 +159,99 @@ describe('normalizeSettings', () => {
       removeThirdPartyReferer: true,
       sendGpc: false,
     });
+  });
+});
+
+describe('hasScriptException', () => {
+  it('covers every path on an origin exception for that site only', () => {
+    const settings = normalizeSettings({
+      scriptExceptions: [
+        { site: 'example.com', script: 'https://cdn.other.test' },
+      ],
+    });
+
+    expect(
+      hasScriptException(settings, 'example.com', 'https://cdn.other.test/'),
+    ).toBe(true);
+    expect(
+      hasScriptException(
+        settings,
+        'example.com',
+        'https://cdn.other.test/assets/chunk.js',
+      ),
+    ).toBe(true);
+    expect(
+      hasScriptException(
+        settings,
+        'example.com',
+        'https://cdn.other.test.evil.test/tracker.js',
+      ),
+    ).toBe(false);
+    expect(
+      hasScriptException(
+        settings,
+        'other.test',
+        'https://cdn.other.test/assets/chunk.js',
+      ),
+    ).toBe(false);
+  });
+
+  it('only matches a path exception exactly', () => {
+    const settings = normalizeSettings({
+      scriptExceptions: [
+        { site: 'example.com', script: 'https://cdn.other.test/app.js' },
+      ],
+    });
+
+    expect(
+      hasScriptException(
+        settings,
+        'example.com',
+        'https://cdn.other.test/app.js',
+      ),
+    ).toBe(true);
+    expect(
+      hasScriptException(
+        settings,
+        'example.com',
+        'https://cdn.other.test/app.js/v2.js',
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('hasGlobalScriptException', () => {
+  it('covers the host, subdomains, and path-scoped entries everywhere', () => {
+    const settings = normalizeSettings({
+      globalScriptExceptions: [
+        'cloudfront.net',
+        'https://www.google.com/recaptcha/',
+      ],
+    });
+
+    expect(
+      hasGlobalScriptException(
+        settings,
+        'https://d111.cloudfront.net/assets/app.js',
+      ),
+    ).toBe(true);
+    expect(
+      hasGlobalScriptException(
+        settings,
+        'https://www.google.com/recaptcha/api.js',
+      ),
+    ).toBe(true);
+    expect(
+      hasGlobalScriptException(
+        settings,
+        'https://www.google.com/other/app.js',
+      ),
+    ).toBe(false);
+    expect(
+      hasGlobalScriptException(
+        settings,
+        'https://cloudfront.net.evil.test/app.js',
+      ),
+    ).toBe(false);
   });
 });

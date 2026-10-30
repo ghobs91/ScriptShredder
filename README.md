@@ -8,8 +8,10 @@ Most script blockers are all-or-nothing: run every script, or run none of them. 
 
 - Blocks third-party `<script>`, dynamic `import()`, and other network-level script requests by default.
 - Keeps first-party scripts, including subdomains such as `cdn.example.com` on `www.example.com`, working.
-- Lists the third-party scripts detected on the current page in the popup, with an **Allow** action for a single script on that site.
+- Ships an always-allowed list for content-only CDNs and captcha providers, so common infrastructure such as `cloudfront.net`, `challenges.cloudflare.com`, jsDelivr, unpkg, and reCAPTCHA keeps working on every site.
+- Lists the third-party scripts detected on the current page in the popup, grouped by host, with one **Allow all** action per host on that site (or **Allow** for a single path) and an **Everywhere** action that allows the host on every site.
 - Adds a per-site pause list for sites that break, stored locally.
+- Lets you add or remove always-allowed hosts in Settings, and restore the recommended defaults.
 - Keeps a local counter of the most frequently blocked third-party scripts.
 - Adds a **Balanced hardening** layer:
   - blocks third-party `ping`/beacon and CSP report requests;
@@ -18,9 +20,26 @@ Most script blockers are all-or-nothing: run every script, or run none of them. 
   - removes third-party DNS-prefetch/preconnect/prefetch/prerender links;
   - reduces third-party Client Hints and Chrome's `X-Client-Data`, and sends `Sec-GPC: 1`;
   - replaces third-party iframes with a click-to-load placeholder and remembers allowed embeds per site.
-- Includes a global on/off switch and a badge count in Chromium-based browsers.
+- Includes a global on/off switch and a per-page badge count of distinct blocked and modified items in Chromium-based browsers (raw request totals appear in the popup).
 - Runs on Chrome, Firefox, and Safari from one codebase with Manifest V3.
 - Has no accounts, analytics, telemetry, or network services.
+
+## Default always-allowed hosts
+
+These hosts are allowed to load scripts and embeds on every site by default. They are content or challenge infrastructure, not ad, analytics, or session-replay services. The list is editable in Settings and can be restored to the defaults at any time.
+
+| Purpose | Hosts |
+| --- | --- |
+| Captchas and bot challenges | `challenges.cloudflare.com`, `hcaptcha.com`, `www.google.com/recaptcha/`, `www.gstatic.com/recaptcha/`, `recaptcha.net` |
+| Content and library CDNs | `cloudfront.net`, `jsdelivr.net`, `cdnjs.cloudflare.com`, `unpkg.com`, `esm.sh`, `cdn.skypack.dev`, `ajax.googleapis.com`, `code.jquery.com`, `stackpath.bootstrapcdn.com`, `cdn.tailwindcss.com`, `cdn.ampproject.org` |
+| Maps | `maps.googleapis.com`, `maps.gstatic.com` |
+| Hosted site builders | `cdn.shopify.com`, `static.parastorage.com`, `static1.squarespace.com` |
+
+An origin entry (host plus `/`) covers the host, its subdomains, and every path. A deeper path ending in `/`, such as `www.google.com/recaptcha/`, covers every script below that path on the exact host, which keeps reCAPTCHA working without allowing every Google script.
+
+`cloudfront.net` and `jsdelivr.net` are generic CDNs, so a tracker hosted on them would also be allowed. They are included because they commonly serve site content and break pages when blocked; remove them in Settings if you prefer strict blocking.
+
+Deliberately excluded: `googletagmanager.com`, `google-analytics.com`, `doubleclick.net`, `connect.facebook.net`, `static.cloudflareinsights.com`, `cdn.segment.com`, `cdn.mxpnl.com`, `static.hotjar.com`, `cdn.onesignal.com`, and similar advertising, analytics, session-replay, and push-notification hosts.
 
 ## Browser support
 
@@ -74,17 +93,20 @@ npx playwright install chromium
 The e2e server maps `site.test`, `api.site.test`, `cdn.test`, and `widget.test` to `127.0.0.1` inside Chromium. It verifies that:
 
 1. A script from `cdn.test` is blocked on `site.test`.
-2. A script from `api.site.test` (same registrable domain) still loads.
-3. The page collector reports the page's script URLs to the extension.
-4. Blocked scripts are counted locally and appear in the settings page.
-5. Pausing `site.test` through the settings UI lets its third-party script load and stops its counters.
-6. Turning protection off lets every script load.
-7. Allowing a single script on `site.test` lets it load, and removing that exception blocks it again.
-8. Removing a paused site blocks it again.
-9. Tracking parameters are removed from the initial navigation and from link clicks.
-10. Third-party speculation links and `ping`/`attributionsrc` attributes are removed.
-11. A third-party iframe loads only after clicking its placeholder, and the embed exception can be removed.
-12. `Sec-GPC` is sent and toggling Referer removal removes the header from third-party requests.
+2. The toolbar badge matches the page's blocked/modified action list.
+3. A script from `api.site.test` (same registrable domain) still loads.
+4. The page collector reports the page's script URLs to the extension.
+5. Blocked scripts are counted locally and appear in the settings page.
+6. Pausing `site.test` through the settings UI lets its third-party script load and stops its counters.
+7. Turning protection off lets every script load.
+8. Allowing a single script on `site.test` lets it load, and removing that exception blocks it again.
+9. Allowing a whole script origin on `site.test` lets every path on that host load, and removing that exception blocks it again.
+10. Allowing a host everywhere lets it load on every site, and removing it blocks it everywhere again.
+11. Removing a paused site blocks it again.
+12. Tracking parameters are removed from the initial navigation and from link clicks.
+13. Third-party speculation links and `ping`/`attributionsrc` attributes are removed.
+14. A third-party iframe loads only after clicking its placeholder, and the embed exception can be removed.
+15. `Sec-GPC` is sent and toggling Referer removal removes the header from third-party requests.
 
 ## How it works
 
@@ -133,6 +155,35 @@ For every individual script or iframe exception, the highest-priority rule allow
 }
 ```
 
+An origin exception stores the origin with a trailing slash (`https://cdn.other.test/`). Because `urlFilter` is a prefix match, the same rule shape covers every script path on that host:
+
+```json
+{
+  "id": 2000,
+  "priority": 3,
+  "action": { "type": "allow" },
+  "condition": {
+    "urlFilter": "|https://cdn.other.test/",
+    "initiatorDomains": ["example.com"],
+    "resourceTypes": ["script"]
+  }
+}
+```
+
+Always-allowed hosts use the same priority but omit `initiatorDomains`, so they apply on every site. Origin entries use the `||host^` domain anchor to cover subdomains, while path entries use a URL prefix. They cover scripts and third-party embeds, so captcha widgets and content iframes are not replaced by click-to-load:
+
+```json
+{
+  "id": 6000,
+  "priority": 3,
+  "action": { "type": "allow" },
+  "condition": {
+    "urlFilter": "||cloudfront.net^",
+    "resourceTypes": ["script", "sub_frame"]
+  }
+}
+```
+
 Hardening adds:
 - redirect rules for known tracking parameters on `main_frame`/`sub_frame` GET navigations, split into small regex chunks to stay under browser regex limits;
 - `modifyHeaders` rules for third-party `Referer`, third-party Client Hints, `X-Client-Data`, and `Sec-GPC`;
@@ -140,10 +191,11 @@ Hardening adds:
 
 The background rebuilds rules whenever settings change, after install, and when the background starts. If a browser rejects header or redirect rules, it retries with a reduced rule set and the content-script fallback continues to clean links and the current URL.
 
-A lightweight content script runs on `http`/`https` pages. It reports script `src` values (plus `modulepreload` and `preload as=script` links) from the top frame and applies the DOM half of Balanced hardening: click-to-load iframe placeholders, tracking-parameter cleanup, speculative-link removal, and `ping`/`attributionsrc` attribute removal. It does not read page text, form data, cookies, or request bodies. The background compares reported URLs against the current settings:
+A lightweight content script runs on `http`/`https` pages. It reports script `src` values (plus `modulepreload` and `preload as=script` links) from the top frame, observes resource URLs through Resource Timing, captures `ping`/`attributionsrc` values before removing them, and applies the DOM half of Balanced hardening: click-to-load iframe placeholders, tracking-parameter cleanup, speculative-link removal, and `ping`/`attributionsrc` attribute removal. It does not read page text, form data, cookies, or request bodies. The background compares reported URLs against the current settings:
 
 - the popup lists the third-party scripts and marks each as blocked or allowed;
 - the settings page increments a local counter for each blocked script, once per page load.
+- the content script builds the per-page **Blocked & modified** list from observable actions; only the total count is sent to the background for the toolbar badge, while action URLs are shared with the extension's popup.
 
 “Third-party” follows the browser's definition: the request's registrable domain (eTLD+1) differs from the domain of the frame that initiated it. This means:
 
@@ -155,6 +207,7 @@ A lightweight content script runs on `http`/`https` pages. It reports script `sr
 - Dynamic `import()` and worker scripts are blocked but are not represented as `<script>` elements, so they may not appear in the page list or counters.
 - The page list and counters cover the top frame. A third-party script inside a third-party iframe is first-party to that iframe and is not counted.
 - The list and counters are inferred from script URLs plus the current rules. They cannot see the browser's final network outcome, so a script that fails for another reason may still be labeled or counted as blocked.
+- The toolbar badge and the popup's **Blocked & modified** list are inferred from what the page can observe: script elements, DOM `ping`/`attributionsrc` attributes, replaced iframes, Resource Timing entries, and URL cleanups. The badge counts the same actions as the list, so the two always agree. Requests the page cannot see — `sendBeacon`, CSP reports, dynamic `import()`, workers, and requests inside cross-origin iframes — are not counted.
 - Header/redirect hardening depends on the browser's `declarativeNetRequest` implementation. Unsupported header or navigation-redirect rules are dropped, while the content-script fallback still cleans the address bar and link clicks.
 
 ## Safari packaging
@@ -212,9 +265,10 @@ src/
     options/             # Full settings page (React)
   lib/
     domain.ts            # URL -> registrable domain and URL/origin normalization
+    globalScripts.ts     # Always-allowed host defaults, matching, and rule filters
     pageScripts.ts       # Third-party classification and blocked-script filtering
     rules.ts             # DNR builder: blocking, pause, exceptions, headers, redirects
-    settings.ts          # Settings, hardening policy, script/iframe exceptions
+    settings.ts          # Settings, hardening policy, script/iframe/global exceptions
     stats.ts             # Local most-blocked-script counters
     tracking.ts          # Tracking-parameter list and URL cleanup
     messaging.ts         # Extension message types and helpers
@@ -232,7 +286,7 @@ tests/e2e/               # Playwright test and local test server
 ## Permissions
 
 - `declarativeNetRequest` — block, allow, redirect, and modify headers on network requests without reading them.
-- `storage` — store the on/off flag, paused sites, script and embed exceptions, hardening policy, and local counters.
+- `storage` — store the on/off flag, paused sites, per-site script and embed exceptions, always-allowed hosts, hardening policy, and local counters.
 - `activeTab` — read the current tab's domain when the popup opens and reload it after a change.
 - Host access to `http`/`https` pages — the content script reads script/script-preload URLs and applies DOM hardening (iframe placeholders, tracking-parameter cleanup, speculative-link and ping-attribute removal). It does not read page text, form data, cookies, or request bodies.
 
@@ -240,7 +294,7 @@ The host permission is explicit because header modification and redirect rules r
 
 ## Privacy
 
-Everything runs locally. The only persisted data is the global on/off flag, paused domains, script and iframe exceptions, hardening toggles, and aggregate blocked-script counters, all in `browser.storage.local`. The content script sends script URLs and page context requests to the extension's own background worker, never to a server. ScriptShredder makes no network requests of its own and has no analytics, telemetry, accounts, or remote configuration. Removing tracking parameters and Referer/Client Hints is done at the browser request layer or in the page DOM, not by a proxy.
+Everything runs locally. The only persisted data is the global on/off flag, paused domains, per-site script and iframe exceptions, always-allowed hosts, hardening toggles, and aggregate blocked-script counters, all in `browser.storage.local`. The content script sends script URLs and page context requests to the extension's own background worker, never to a server. ScriptShredder makes no network requests of its own and has no analytics, telemetry, accounts, or remote configuration. Removing tracking parameters and Referer/Client Hints is done at the browser request layer or in the page DOM, not by a proxy.
 
 ## Packaging
 

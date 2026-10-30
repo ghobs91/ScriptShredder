@@ -11,6 +11,7 @@ import {
   isGetPageContextMessage,
   isRecordBlockedScriptsMessage,
   isResetStatsMessage,
+  isSyncBadgeMessage,
   isSyncRulesMessage,
   type PageContext,
 } from '../lib/messaging';
@@ -105,6 +106,12 @@ export default defineBackground(() => {
             .filter((exception) => exception.site === site)
             .map((exception) => exception.frame)
         : [],
+      scriptExceptions: site
+        ? settings.scriptExceptions
+            .filter((exception) => exception.site === site)
+            .map((exception) => exception.script)
+        : [],
+      globalScriptExceptions: settings.globalScriptExceptions,
     };
   }
 
@@ -151,21 +158,42 @@ export default defineBackground(() => {
     await syncRules();
   }
 
-  async function enableActionCount(): Promise<void> {
+  function badgeText(count: number): string {
+    const value = Math.floor(count);
+    if (value <= 0) return '';
+    return value > 999 ? '999+' : String(value);
+  }
+
+  async function setTabBadge(tabId: number, count: number): Promise<void> {
+    if (typeof browser.action?.setBadgeText !== 'function') return;
+
+    await browser.action.setBadgeText({
+      tabId,
+      text: badgeText(count),
+    });
+  }
+
+  async function configureBadge(): Promise<void> {
+    // Older builds used the browser's DNR action count, which also counts
+    // header-editing rules. Disable it so the script-action badge wins.
     const dnr = browser.declarativeNetRequest as unknown as {
       setExtensionActionOptions?: (options: {
         displayActionCountAsBadgeText: boolean;
       }) => Promise<void>;
     };
 
-    if (typeof dnr.setExtensionActionOptions !== 'function') return;
-
     try {
-      await dnr.setExtensionActionOptions({
-        displayActionCountAsBadgeText: true,
+      await dnr.setExtensionActionOptions?.({
+        displayActionCountAsBadgeText: false,
       });
     } catch {
       // Optional browser feature. Firefox and Safari don't implement it.
+    }
+
+    try {
+      await browser.action?.setBadgeBackgroundColor?.({ color: '#11160f' });
+    } catch {
+      // Badge colors are optional in some browsers.
     }
   }
 
@@ -174,11 +202,13 @@ export default defineBackground(() => {
   }
 
   browser.runtime.onInstalled.addListener(() => {
-    void syncRules().then(enableActionCount).catch(reportError);
+    void configureBadge().catch(reportError);
+    void syncRules().catch(reportError);
   });
 
   browser.runtime.onStartup.addListener(() => {
-    void syncRules().then(enableActionCount).catch(reportError);
+    void configureBadge().catch(reportError);
+    void syncRules().catch(reportError);
   });
 
   browser.storage.onChanged.addListener((changes, areaName) => {
@@ -186,12 +216,19 @@ export default defineBackground(() => {
     void syncRules().catch(reportError);
   });
 
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === 'loading') {
+      void setTabBadge(tabId, 0).catch(reportError);
+    }
+  });
+
   // Reconcile on every background start. Dynamic rules normally survive, but
   // this recovers from extension updates, manual storage edits, and browser
   // states where the ruleset was cleared.
+  void configureBadge().catch(reportError);
   void syncRules().catch(reportError);
 
-  browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (isSyncRulesMessage(message)) {
       syncRules()
         .then(() => sendResponse({ ok: true }))
@@ -245,6 +282,16 @@ export default defineBackground(() => {
         });
 
       return true;
+    }
+
+    if (isSyncBadgeMessage(message)) {
+      const tabId = sender.tab?.id;
+      if (tabId !== undefined) {
+        void setTabBadge(tabId, message.count).catch(reportError);
+      }
+      sendResponse({ ok: true });
+
+      return false;
     }
 
     return false;
